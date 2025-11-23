@@ -1,7 +1,7 @@
-// bst_visualizer_validated.cpp
-// BST Visualizer with Insert (animated traversal), Delete (Option C step-by-step),
-// Search (Option C path + flash) and validations/messages.
-// Compile with: g++ bst_visualizer_validated.cpp -o bst_vis -std=c++17 `pkg-config --cflags --libs raylib`
+// bst_visualizer_final.cpp
+// BST Visualizer - Insert/Delete/Search with validations and animations.
+// Messages now show the user-entered value (not node value).
+// Compile with: g++ bst_visualizer_final.cpp -o bst_vis -std=c++17 `pkg-config --cflags --libs raylib`
 
 #include "raylib.h"
 #include <iostream>
@@ -129,7 +129,7 @@ void DeleteNodePointer(Node*& ptr) {
     ptr = nullptr;
 }
 
-// ---------- Insert immediate helper (keeps old insertion quick path for fallback) ----------
+// ---------- Insert immediate helper (fallback) ----------
 void InsertValueImmediate(Node*& rootRef, int value) {
     if (!rootRef) {
         rootRef = new Node(value, SCREEN_W / 2.0f, 80.0f);
@@ -175,7 +175,7 @@ static bool insNewIsLeft = false;
 static int insFinalizeTimer = 0; // frames to show blue after insertion
 static int insValuePending = 0;
 
-// Delete state (existing)
+// Delete state
 enum DelStage {
     DEL_IDLE, DEL_TRAVERSING, DEL_HIGHLIGHT_TARGET, DEL_HIGHLIGHT_SUCCESSOR,
     DEL_MOVE_SUCCESSOR, DEL_MOVE_CHILD_UP, DEL_SHRINK_REMOVE, DEL_FINALIZE
@@ -194,8 +194,9 @@ static Node* animReplaceNode = nullptr;
 static float moveStartX = 0, moveStartY = 0, moveTargetX = 0, moveTargetY = 0;
 static float animDuration = 24.0f;
 static float animProgress = 0.0f;
+static int delValuePending = 0; // <-- pending delete value entered by user
 
-// Search state (existing)
+// Search state
 enum SearchStage { S_IDLE, S_TRAVERSING, S_FLASH_FOUND, S_FLASH_NOTFOUND };
 static SearchStage searchStage = S_IDLE;
 static std::vector<Node*> searchPath;
@@ -205,6 +206,7 @@ static const int SEARCH_STEP_FRAMES = 12;
 static int flashCount = 0;
 static const int FLASH_FRAMES = 12; // frames per flash on/off
 static Node* searchFinalNode = nullptr;
+static int searchValuePending = 0; // <-- pending search value entered by user
 
 // --- Status message (validations) ---
 static std::string statusMessage = "";
@@ -271,7 +273,7 @@ void AttachNewNodeFromPending() {
     RecomputeLayoutAndSnap(root);
     // Start finalize timer (2 seconds)
     insFinalizeTimer = 120;
-    // Set status message
+    // Set status message based on user-entered value
     statusMessage = "Inserted " + std::to_string(insValuePending);
     statusTimer = 120;
 }
@@ -290,6 +292,8 @@ void StartDeletion(int value) {
     animReplaceNode = nullptr;
     animProgress = 0;
 
+    delValuePending = value;
+
     Node* cur = root;
     Node* parent = nullptr;
     while (cur) {
@@ -304,7 +308,6 @@ void StartDeletion(int value) {
         else cur = cur->right;
     }
     RecomputeLayoutAndSnap(root);
-    // If not found we'll show message later in state machine
 }
 
 // ---------- Start search traversal ----------
@@ -315,6 +318,7 @@ void StartSearch(int value) {
     flashCount = 0;
     searchFinalNode = nullptr;
     searchStage = S_TRAVERSING;
+    searchValuePending = value;
 
     Node* cur = root;
     while (cur) {
@@ -340,22 +344,9 @@ void FinalizeNewNodes(Node* n) {
     FinalizeNewNodes(n->right);
 }
 
-// Find parent by pointer (for rewiring if needed)
-Node* FindParentByPtr(Node* rootRef, Node* child) {
-    if (!rootRef || rootRef == child) return nullptr;
-    std::function<Node* (Node*)> findParentByPtr = [&](Node* n)->Node* {
-        if (!n) return nullptr;
-        if (n->left == child || n->right == child) return n;
-        Node* p = findParentByPtr(n->left);
-        if (p) return p;
-        return findParentByPtr(n->right);
-        };
-    return findParentByPtr(rootRef);
-}
-
 // ---------- Main ----------
 int main() {
-    InitWindow(SCREEN_W, SCREEN_H, "BST Visualizer - Validated (Insert/Delete/Search + Messages)");
+    InitWindow(SCREEN_W, SCREEN_H, "BST Visualizer - Final (values displayed as entered by user)");
     SetTargetFPS(60);
 
     // UI
@@ -372,6 +363,9 @@ int main() {
     camera.target = { 0,0 };
     camera.offset = { 0,0 };
     camera.zoom = 1.0f;
+
+    // helper timers
+    int insertFinalize = 0;
 
     while (!WindowShouldClose()) {
         Vector2 mouse = GetMousePosition();
@@ -408,13 +402,12 @@ int main() {
                 // Decide action based on mode, obey blocking rules:
                 bool animationsRunning = (delStage != DEL_IDLE) || (insStage != INS_IDLE && insStage != INS_FINALIZE) || (searchStage != S_IDLE);
                 if (mode == MODE_INSERT) {
-                    // Block insert if a delete is running (to keep things stable)
+                    // Block insert if a delete is running (stability)
                     if (delStage == DEL_IDLE && insStage == INS_IDLE) {
                         StartInsertion(v);
                         inputText.clear();
                     }
                     else {
-                        // show message: action blocked
                         statusMessage = "Insert blocked until current animation finishes.";
                         statusTimer = 120;
                     }
@@ -430,7 +423,6 @@ int main() {
                     }
                 }
                 else { // MODE_SEARCH
-                    // block search until del and insert animations finish (per Option 2)
                     if (delStage == DEL_IDLE && insStage == INS_IDLE && searchStage == S_IDLE) {
                         StartSearch(v);
                         inputText.clear();
@@ -464,7 +456,7 @@ int main() {
                     // attach node now
                     insStage = INS_ATTACHING;
                     AttachNewNodeFromPending();
-                    // after attaching, we go to finalize stage where the new node will become blue for 120 frames
+                    // after attaching, go to finalize stage where the new node will become blue for 120 frames
                     insStage = INS_FINALIZE;
                 }
             }
@@ -472,16 +464,11 @@ int main() {
         else if (insStage == INS_FINALIZE) {
             if (insFinalizeTimer > 0) {
                 insFinalizeTimer--;
-                // keep newly inserted node blue for 120 frames after turning from red
-                if (insFinalizeTimer == 0 && insNewNode) {
-                    // convert any remaining RED->SKYBLUE
+                if (insFinalizeTimer == 0) {
                     FinalizeNewNodes(root);
                     insNewNode = nullptr;
+                    insStage = INS_IDLE;
                 }
-            }
-            else {
-                // nothing
-                insStage = INS_IDLE;
             }
         }
 
@@ -495,8 +482,8 @@ int main() {
                 }
                 else {
                     if (!delTargetNode) {
-                        // Not found -> show message
-                        statusMessage = "Value " + std::to_string(delTraversalPath.empty() ? 0 : delTraversalPath.back()->value) + " not found for deletion";
+                        // Not found -> show message using user-entered value
+                        statusMessage = "Value " + std::to_string(delValuePending) + " not found for deletion";
                         statusTimer = 120;
                         delStage = DEL_IDLE;
                         delTraversalPath.clear();
@@ -568,8 +555,8 @@ int main() {
                 RecomputeLayoutAndSnap(root);
                 delStage = DEL_FINALIZE;
                 delFramesCounter = 0;
-                // show success message
-                statusMessage = "Deleted " + std::to_string(delTargetNode->value);
+                // show success message using user-entered value
+                statusMessage = "Deleted " + std::to_string(delValuePending);
                 statusTimer = 120;
             }
         }
@@ -600,8 +587,8 @@ int main() {
                 animNode = nullptr;
                 RecomputeLayoutAndSnap(root);
                 delStage = DEL_FINALIZE;
-                // success message
-                statusMessage = "Deleted " + std::to_string(insValuePending); // note: best-effort; adjusted below if needed
+                // success message using user-entered value
+                statusMessage = "Deleted " + std::to_string(delValuePending);
                 statusTimer = 120;
             }
         }
@@ -613,7 +600,7 @@ int main() {
                 animNode->color = Fade(RED, 1.0f - animProgress);
                 if (animProgress >= 1.0f) {
                     Node* parent = delTargetParent;
-                    int deletedVal = animNode->value;
+                    // show deleted value using pending
                     if (!parent) {
                         DeleteNodePointer(root);
                     }
@@ -626,7 +613,7 @@ int main() {
                     delTargetNode = nullptr;
                     RecomputeLayoutAndSnap(root);
                     delStage = DEL_FINALIZE;
-                    statusMessage = "Deleted " + std::to_string(deletedVal);
+                    statusMessage = "Deleted " + std::to_string(delValuePending);
                     statusTimer = 120;
                 }
             }
@@ -658,19 +645,19 @@ int main() {
                         if (searchPath.empty()) {
                             searchStage = S_FLASH_NOTFOUND;
                             searchFinalNode = nullptr;
-                            statusMessage = "Not found";
+                            statusMessage = "Not found " + std::to_string(searchValuePending);
                             statusTimer = 120;
                         }
                         else {
                             if (searchFinalNode != nullptr) {
                                 searchStage = S_FLASH_FOUND;
-                                statusMessage = "Found " + std::to_string(searchFinalNode->value);
+                                statusMessage = "Found " + std::to_string(searchValuePending);
                                 statusTimer = 120;
                             }
                             else {
                                 searchStage = S_FLASH_NOTFOUND;
                                 searchFinalNode = searchPath.back();
-                                statusMessage = "Not found " + std::to_string(searchFinalNode->value);
+                                statusMessage = "Not found " + std::to_string(searchValuePending);
                                 statusTimer = 120;
                             }
                         }
@@ -712,7 +699,8 @@ int main() {
             insFinalizeTimer--;
             if (insFinalizeTimer == 0) {
                 FinalizeNewNodes(root);
-                // show inserted message already set in AttachNewNodeFromPending
+                insNewNode = nullptr;
+                insStage = INS_IDLE;
             }
         }
 
@@ -759,6 +747,15 @@ int main() {
 
         // Draw insertion traversal rings (visited nodes remain yellow while traversing)
         if (insStage == INS_TRAVERSING) {
+            // populate traversal list if empty (edge case)
+            if (insTraversalPath.empty() && root) {
+                Node* tmp = root;
+                while (tmp) {
+                    insTraversalPath.push_back(tmp);
+                    if (insValuePending < tmp->value) tmp = tmp->left;
+                    else tmp = tmp->right;
+                }
+            }
             for (int i = 0; i < std::min(insTraversalIndex, (int)insTraversalPath.size()); ++i) {
                 Node* n = insTraversalPath[i];
                 DrawCircle((int)n->animX, (int)n->animY, n->radius + 6, Fade(YELLOW, 0.85f));
@@ -787,7 +784,7 @@ int main() {
 
         // UI top
         DrawRectangle(0, 0, SCREEN_W, 160, LIGHTGRAY);
-        DrawText("BST Visualizer - Insert (animated), Delete (Option C), Search (Option C) + Validations", 20, 18, 18, BLACK);
+        DrawText("BST Visualizer - Insert / Delete (Option C) / Search (Option C) - Final", 20, 18, 18, BLACK);
         DrawText("Click Insert/Delete/Search then type value and press Enter. Search waits while delete/insert animations run.", 20, 40, 16, DARKGRAY);
 
         // Draw buttons
@@ -829,23 +826,13 @@ int main() {
         }
 
         // --- Advance insTraversalPath population at start of insStage ---
-        // When insertion started, we populated insParent/insNewX/insNewY in StartInsertion(). But we also need insTraversalPath content:
-        // If insStage is INS_TRAVERSING and insTraversalPath empty, populate it now (so we don't race).
         if (insStage == INS_TRAVERSING && insTraversalPath.empty()) {
-            // Re-simulate traversal to fill insTraversalPath
-            Node* cur = root;
-            if (!cur) {
-                // nothing to traverse (root will be created)
-                // nothing to populate
-            }
-            else {
-                Node* parent = nullptr;
-                float offset = 220.0f;
-                Node* temp = root;
-                while (temp) {
-                    insTraversalPath.push_back(temp);
-                    if (insValuePending < temp->value) temp = temp->left;
-                    else temp = temp->right;
+            if (root) {
+                Node* tmp = root;
+                while (tmp) {
+                    insTraversalPath.push_back(tmp);
+                    if (insValuePending < tmp->value) tmp = tmp->left;
+                    else tmp = tmp->right;
                 }
             }
             insTraversalIndex = 0;
