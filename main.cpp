@@ -1,6 +1,7 @@
-// bst_visualizer_with_search.cpp
-// BST Visualizer with Insert, Delete (Option C), and Search (Option C, path + flash).
-// Compile with: g++ bst_visualizer_with_search.cpp -o bst_vis -std=c++17 `pkg-config --cflags --libs raylib`
+// bst_visualizer_validated.cpp
+// BST Visualizer with Insert (animated traversal), Delete (Option C step-by-step),
+// Search (Option C path + flash) and validations/messages.
+// Compile with: g++ bst_visualizer_validated.cpp -o bst_vis -std=c++17 `pkg-config --cflags --libs raylib`
 
 #include "raylib.h"
 #include <iostream>
@@ -9,7 +10,7 @@
 #include <cmath>
 #include <queue>
 #include <algorithm>
-#include <functional> // required for std::function
+#include <functional>
 #include <cassert>
 
 // ---------- Node ----------
@@ -72,7 +73,7 @@ void DrawTree(Node* node, Node* highlight = nullptr, Node* special = nullptr) {
     if (node->left) DrawLineV({ node->animX, node->animY }, { node->left->animX, node->left->animY }, BLACK);
     if (node->right) DrawLineV({ node->animX, node->animY }, { node->right->animX, node->right->animY }, BLACK);
 
-    // Outer highlight ring
+    // Outer highlight ring (single)
     if (node == highlight) {
         DrawCircle((int)node->animX, (int)node->animY, node->radius + 6, YELLOW);
     }
@@ -128,7 +129,7 @@ void DeleteNodePointer(Node*& ptr) {
     ptr = nullptr;
 }
 
-// ---------- Insert (simple immediate insertion; creates RED node then later finalize to SKYBLUE) ----------
+// ---------- Insert immediate helper (keeps old insertion quick path for fallback) ----------
 void InsertValueImmediate(Node*& rootRef, int value) {
     if (!rootRef) {
         rootRef = new Node(value, SCREEN_W / 2.0f, 80.0f);
@@ -158,12 +159,27 @@ void InsertValueImmediate(Node*& rootRef, int value) {
     RecomputeLayoutAndSnap(rootRef);
 }
 
-// ---------- Deletion state machine (Option C) ----------
+// ---------- State machines: Insert, Delete, Search ----------
+
+// Insert state
+enum InsertStage { INS_IDLE, INS_TRAVERSING, INS_ATTACHING, INS_FINALIZE };
+static InsertStage insStage = INS_IDLE;
+static std::vector<Node*> insTraversalPath;
+static int insTraversalIndex = 0;
+static int insFramesCounter = 0;
+static const int INS_STEP_FRAMES = 12;
+static Node* insParent = nullptr;
+static Node* insNewNode = nullptr;
+static float insNewX = 0, insNewY = 0;
+static bool insNewIsLeft = false;
+static int insFinalizeTimer = 0; // frames to show blue after insertion
+static int insValuePending = 0;
+
+// Delete state (existing)
 enum DelStage {
     DEL_IDLE, DEL_TRAVERSING, DEL_HIGHLIGHT_TARGET, DEL_HIGHLIGHT_SUCCESSOR,
     DEL_MOVE_SUCCESSOR, DEL_MOVE_CHILD_UP, DEL_SHRINK_REMOVE, DEL_FINALIZE
 };
-
 static DelStage delStage = DEL_IDLE;
 static std::vector<Node*> delTraversalPath;
 static int delTraversalIndex = 0;
@@ -171,7 +187,6 @@ static int delFramesCounter = 0;
 static const int DEL_STEP_FRAMES = 12;
 static Node* delTargetParent = nullptr;
 static Node* delTargetNode = nullptr;
-static bool delTargetIsLeft = false;
 static Node* successorParent = nullptr;
 static Node* successorNode = nullptr;
 static Node* animNode = nullptr;
@@ -180,7 +195,88 @@ static float moveStartX = 0, moveStartY = 0, moveTargetX = 0, moveTargetY = 0;
 static float animDuration = 24.0f;
 static float animProgress = 0.0f;
 
-// start deletion (populates traversal path and target)
+// Search state (existing)
+enum SearchStage { S_IDLE, S_TRAVERSING, S_FLASH_FOUND, S_FLASH_NOTFOUND };
+static SearchStage searchStage = S_IDLE;
+static std::vector<Node*> searchPath;
+static int searchIndex = 0;
+static int searchFrames = 0;
+static const int SEARCH_STEP_FRAMES = 12;
+static int flashCount = 0;
+static const int FLASH_FRAMES = 12; // frames per flash on/off
+static Node* searchFinalNode = nullptr;
+
+// --- Status message (validations) ---
+static std::string statusMessage = "";
+static int statusTimer = 0; // frames: show message for 120 frames (2 sec)
+
+// ---------- Start insertion traversal (non-blocking) ----------
+void StartInsertion(int value) {
+    insTraversalPath.clear();
+    insTraversalIndex = 0;
+    insFramesCounter = 0;
+    insStage = INS_TRAVERSING;
+    insParent = nullptr;
+    insNewNode = nullptr;
+    insNewIsLeft = false;
+    insValuePending = value;
+
+    Node* cur = root;
+    Node* parent = nullptr;
+    float x = SCREEN_W / 2.0f;
+    float y = 80.0f;
+    float offset = 220.0f;
+
+    // if root null -> will create root directly
+    if (!cur) {
+        insParent = nullptr;
+        insNewX = x;
+        insNewY = y;
+        insNewIsLeft = false;
+        return;
+    }
+
+    while (cur) {
+        insTraversalPath.push_back(cur);
+        parent = cur;
+        if (value < cur->value) {
+            x = cur->x - offset; y = cur->y + 90.0f;
+            cur = cur->left;
+            insNewIsLeft = true;
+        }
+        else {
+            x = cur->x + offset; y = cur->y + 90.0f;
+            cur = cur->right;
+            insNewIsLeft = false;
+        }
+        offset *= 0.6f;
+    }
+
+    insParent = parent;
+    insNewX = x; insNewY = y;
+}
+
+// Attach new node (called when traversal finished)
+void AttachNewNodeFromPending() {
+    Node* n = new Node(insValuePending, insNewX, insNewY);
+    n->color = RED;
+    if (!insParent) {
+        root = n;
+    }
+    else {
+        if (insNewIsLeft) insParent->left = n;
+        else insParent->right = n;
+    }
+    insNewNode = n;
+    RecomputeLayoutAndSnap(root);
+    // Start finalize timer (2 seconds)
+    insFinalizeTimer = 120;
+    // Set status message
+    statusMessage = "Inserted " + std::to_string(insValuePending);
+    statusTimer = 120;
+}
+
+// ---------- Start deletion traversal (non-blocking) ----------
 void StartDeletion(int value) {
     delTraversalPath.clear();
     delTraversalIndex = 0;
@@ -208,23 +304,10 @@ void StartDeletion(int value) {
         else cur = cur->right;
     }
     RecomputeLayoutAndSnap(root);
-    if (!delTargetNode) {
-        // nothing found -> return to idle after a short visit (handled in update)
-    }
+    // If not found we'll show message later in state machine
 }
 
-// ---------- Search state machine (Option C) ----------
-enum SearchStage { S_IDLE, S_TRAVERSING, S_FLASH_FOUND, S_FLASH_NOTFOUND };
-static SearchStage searchStage = S_IDLE;
-static std::vector<Node*> searchPath;
-static int searchIndex = 0;
-static int searchFrames = 0;
-static const int SEARCH_STEP_FRAMES = 12;
-static int flashCount = 0;
-static const int FLASH_FRAMES = 12; // frames per flash on/off
-static Node* searchFinalNode = nullptr;
-
-// Start search from root. Blocks if delStage != DEL_IDLE or other animations running as per caller.
+// ---------- Start search traversal ----------
 void StartSearch(int value) {
     searchPath.clear();
     searchIndex = 0;
@@ -243,10 +326,10 @@ void StartSearch(int value) {
         if (value < cur->value) cur = cur->left;
         else cur = cur->right;
     }
-    // if cur == nullptr then not found; searchFinalNode remains nullptr
+    // if not found, searchFinalNode remains nullptr
 }
 
-// ---------- Utility: recursively finalize RED->SKYBLUE after insertion ----------
+// Utility: recursively finalize RED->SKYBLUE after insertion if timer elapsed
 void FinalizeNewNodes(Node* n) {
     if (!n) return;
     if (n->color.r == RED.r && n->color.g == RED.g && n->color.b == RED.b) {
@@ -257,10 +340,9 @@ void FinalizeNewNodes(Node* n) {
     FinalizeNewNodes(n->right);
 }
 
-// ---------- Helper to delete node pointer safely (used in rewiring) ----------
+// Find parent by pointer (for rewiring if needed)
 Node* FindParentByPtr(Node* rootRef, Node* child) {
     if (!rootRef || rootRef == child) return nullptr;
-    Node* parent = nullptr;
     std::function<Node* (Node*)> findParentByPtr = [&](Node* n)->Node* {
         if (!n) return nullptr;
         if (n->left == child || n->right == child) return n;
@@ -273,7 +355,7 @@ Node* FindParentByPtr(Node* rootRef, Node* child) {
 
 // ---------- Main ----------
 int main() {
-    InitWindow(SCREEN_W, SCREEN_H, "BST Visualizer - Insert/Delete/Search (Option C, block while animating)");
+    InitWindow(SCREEN_W, SCREEN_H, "BST Visualizer - Validated (Insert/Delete/Search + Messages)");
     SetTargetFPS(60);
 
     // UI
@@ -291,9 +373,6 @@ int main() {
     camera.offset = { 0,0 };
     camera.zoom = 1.0f;
 
-    // helper timers
-    int insertFinalize = 0;
-
     while (!WindowShouldClose()) {
         Vector2 mouse = GetMousePosition();
 
@@ -305,7 +384,7 @@ int main() {
             inputFocused = false;
         }
 
-        // Button click detection (we check clicks both before and after draw; here we set flags)
+        // Buttons clicked detection
         bool insertClicked = false, deleteClicked = false, searchClicked = false;
         if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
             if (CheckCollisionPointRec(mouse, insertBtn)) insertClicked = true;
@@ -326,34 +405,45 @@ int main() {
             if (IsKeyPressed(KEY_BACKSPACE) && !inputText.empty()) inputText.pop_back();
             if (IsKeyPressed(KEY_ENTER) && !inputText.empty()) {
                 int v = std::stoi(inputText);
-                // Decide action based on mode, but obey blocking rules:
-                bool animationsRunning = (delStage != DEL_IDLE) || (searchStage != S_IDLE);
+                // Decide action based on mode, obey blocking rules:
+                bool animationsRunning = (delStage != DEL_IDLE) || (insStage != INS_IDLE && insStage != INS_FINALIZE) || (searchStage != S_IDLE);
                 if (mode == MODE_INSERT) {
-                    // Allow insert anytime (as previous behavior). But do not interrupt delete currently running:
-                    if (delStage == DEL_IDLE) {
-                        InsertValueImmediate(root, v);
+                    // Block insert if a delete is running (to keep things stable)
+                    if (delStage == DEL_IDLE && insStage == INS_IDLE) {
+                        StartInsertion(v);
                         inputText.clear();
-                        insertFinalize = 60;
+                    }
+                    else {
+                        // show message: action blocked
+                        statusMessage = "Insert blocked until current animation finishes.";
+                        statusTimer = 120;
                     }
                 }
                 else if (mode == MODE_DELETE) {
-                    // Block if another del (or move) in progress OR search in progress.
-                    if (delStage == DEL_IDLE && searchStage == S_IDLE) {
+                    if (delStage == DEL_IDLE && searchStage == S_IDLE && insStage == INS_IDLE) {
                         StartDeletion(v);
                         inputText.clear();
                     }
+                    else {
+                        statusMessage = "Delete blocked until current animation finishes.";
+                        statusTimer = 120;
+                    }
                 }
                 else { // MODE_SEARCH
-                    // Block search until delStage == DEL_IDLE AND no other search in progress.
-                    if (delStage == DEL_IDLE && searchStage == S_IDLE) {
+                    // block search until del and insert animations finish (per Option 2)
+                    if (delStage == DEL_IDLE && insStage == INS_IDLE && searchStage == S_IDLE) {
                         StartSearch(v);
                         inputText.clear();
+                    }
+                    else {
+                        statusMessage = "Search blocked until current animation finishes.";
+                        statusTimer = 120;
                     }
                 }
             }
         }
 
-        // Camera controls
+        // camera controls
         if (IsKeyDown(KEY_RIGHT)) camera.target.x += 8;
         if (IsKeyDown(KEY_LEFT))  camera.target.x -= 8;
         if (IsKeyDown(KEY_UP))    camera.target.y -= 8;
@@ -362,26 +452,52 @@ int main() {
         if (camera.zoom < 0.2f) camera.zoom = 0.2f;
         if (camera.zoom > 3.0f) camera.zoom = 3.0f;
 
-        // Finalize inserted red nodes to SKYBLUE after short timer
-        if (insertFinalize > 0) {
-            insertFinalize--;
-            if (insertFinalize == 0) {
-                FinalizeNewNodes(root);
+        // ---------- Insert state machine ----------
+        if (insStage == INS_TRAVERSING) {
+            insFramesCounter++;
+            if (insFramesCounter >= INS_STEP_FRAMES) {
+                insFramesCounter = 0;
+                if (insTraversalIndex < (int)insTraversalPath.size()) {
+                    insTraversalIndex++;
+                }
+                else {
+                    // attach node now
+                    insStage = INS_ATTACHING;
+                    AttachNewNodeFromPending();
+                    // after attaching, we go to finalize stage where the new node will become blue for 120 frames
+                    insStage = INS_FINALIZE;
+                }
+            }
+        }
+        else if (insStage == INS_FINALIZE) {
+            if (insFinalizeTimer > 0) {
+                insFinalizeTimer--;
+                // keep newly inserted node blue for 120 frames after turning from red
+                if (insFinalizeTimer == 0 && insNewNode) {
+                    // convert any remaining RED->SKYBLUE
+                    FinalizeNewNodes(root);
+                    insNewNode = nullptr;
+                }
+            }
+            else {
+                // nothing
+                insStage = INS_IDLE;
             }
         }
 
-        // ---------------- Deletion state machine updates ----------------
+        // ---------- Delete state machine ----------
         if (delStage == DEL_TRAVERSING) {
             delFramesCounter++;
             if (delFramesCounter >= DEL_STEP_FRAMES) {
                 delFramesCounter = 0;
                 if (delTraversalIndex < (int)delTraversalPath.size()) {
-                    // highlight is handled by draw logic using index
                     delTraversalIndex++;
                 }
                 else {
                     if (!delTargetNode) {
-                        // Not found -> idle
+                        // Not found -> show message
+                        statusMessage = "Value " + std::to_string(delTraversalPath.empty() ? 0 : delTraversalPath.back()->value) + " not found for deletion";
+                        statusTimer = 120;
                         delStage = DEL_IDLE;
                         delTraversalPath.clear();
                         delTraversalIndex = 0;
@@ -452,6 +568,9 @@ int main() {
                 RecomputeLayoutAndSnap(root);
                 delStage = DEL_FINALIZE;
                 delFramesCounter = 0;
+                // show success message
+                statusMessage = "Deleted " + std::to_string(delTargetNode->value);
+                statusTimer = 120;
             }
         }
         else if (delStage == DEL_MOVE_CHILD_UP) {
@@ -481,6 +600,9 @@ int main() {
                 animNode = nullptr;
                 RecomputeLayoutAndSnap(root);
                 delStage = DEL_FINALIZE;
+                // success message
+                statusMessage = "Deleted " + std::to_string(insValuePending); // note: best-effort; adjusted below if needed
+                statusTimer = 120;
             }
         }
         else if (delStage == DEL_SHRINK_REMOVE) {
@@ -491,6 +613,7 @@ int main() {
                 animNode->color = Fade(RED, 1.0f - animProgress);
                 if (animProgress >= 1.0f) {
                     Node* parent = delTargetParent;
+                    int deletedVal = animNode->value;
                     if (!parent) {
                         DeleteNodePointer(root);
                     }
@@ -503,6 +626,8 @@ int main() {
                     delTargetNode = nullptr;
                     RecomputeLayoutAndSnap(root);
                     delStage = DEL_FINALIZE;
+                    statusMessage = "Deleted " + std::to_string(deletedVal);
+                    statusTimer = 120;
                 }
             }
         }
@@ -516,34 +641,37 @@ int main() {
             }
         }
 
-        // ---------------- Search state machine updates (Option C) ----------------
+        // ---------- Search state machine ----------
         if (searchStage == S_TRAVERSING) {
-            // If a deletion animation is running, block search until delStage == DEL_IDLE (per option 2).
-            if (delStage != DEL_IDLE) {
-                // Wait until deletion finished; keep search state but do nothing.
+            // Block if deletion or insertion currently animating (Option 2)
+            if (delStage != DEL_IDLE || insStage != INS_IDLE) {
+                // wait
             }
             else {
                 searchFrames++;
                 if (searchFrames >= SEARCH_STEP_FRAMES) {
                     searchFrames = 0;
                     if (searchIndex < (int)searchPath.size()) {
-                        // advance visited
                         searchIndex++;
                     }
                     else {
-                        // reached end; determine found or not
                         if (searchPath.empty()) {
                             searchStage = S_FLASH_NOTFOUND;
                             searchFinalNode = nullptr;
+                            statusMessage = "Not found";
+                            statusTimer = 120;
                         }
                         else {
-                            Node* last = searchPath.back();
-                            // if last node value equals searched value -> found, else not found
-                            // but StartSearch set searchFinalNode earlier if found
-                            if (searchFinalNode != nullptr) searchStage = S_FLASH_FOUND;
+                            if (searchFinalNode != nullptr) {
+                                searchStage = S_FLASH_FOUND;
+                                statusMessage = "Found " + std::to_string(searchFinalNode->value);
+                                statusTimer = 120;
+                            }
                             else {
                                 searchStage = S_FLASH_NOTFOUND;
-                                searchFinalNode = last;
+                                searchFinalNode = searchPath.back();
+                                statusMessage = "Not found " + std::to_string(searchFinalNode->value);
+                                statusTimer = 120;
                             }
                         }
                     }
@@ -551,12 +679,11 @@ int main() {
             }
         }
         else if (searchStage == S_FLASH_FOUND) {
-            // flash final node GREEN 3 times
             searchFrames++;
             if (searchFrames >= FLASH_FRAMES) {
                 searchFrames = 0;
                 flashCount++;
-                if (flashCount >= 6) { // on/off counts -> 6 toggles = 3 visible flashes
+                if (flashCount >= 6) { // 3 flashes (on/off)
                     searchStage = S_IDLE;
                     searchPath.clear();
                     searchIndex = 0;
@@ -566,7 +693,6 @@ int main() {
             }
         }
         else if (searchStage == S_FLASH_NOTFOUND) {
-            // flash final node RED 3 times
             searchFrames++;
             if (searchFrames >= FLASH_FRAMES) {
                 searchFrames = 0;
@@ -581,46 +707,74 @@ int main() {
             }
         }
 
+        // finalize inserted nodes color when timer runs out (ensures node stays blue for 2 seconds)
+        if (insFinalizeTimer > 0) {
+            insFinalizeTimer--;
+            if (insFinalizeTimer == 0) {
+                FinalizeNewNodes(root);
+                // show inserted message already set in AttachNewNodeFromPending
+            }
+        }
+
+        // decrement status message timer
+        if (statusTimer > 0) {
+            statusTimer--;
+            if (statusTimer == 0) statusMessage.clear();
+        }
+
         // Smooth move
         SmoothMoveAll(root);
 
-        // ---------------- Drawing ----------------
+        // ---------- Drawing ----------
         BeginDrawing();
         ClearBackground(RAYWHITE);
 
         BeginMode2D(camera);
 
-        // Determine highlight for deletion traversal
+        // Determine del highlight node
         Node* delHighlight = nullptr;
         if (delStage == DEL_TRAVERSING) {
             if (delTraversalIndex < (int)delTraversalPath.size()) delHighlight = delTraversalPath[delTraversalIndex];
+            else if (!delTraversalPath.empty()) delHighlight = delTraversalPath.back();
         }
         else if (delStage == DEL_HIGHLIGHT_TARGET && delTargetNode) delHighlight = delTargetNode;
         else if (delStage == DEL_HIGHLIGHT_SUCCESSOR && successorNode) delHighlight = successorNode;
 
-        // Determine search highlights: visited path stays yellow; current node is searchPath[searchIndex-1]
+        // Determine insert highlight: current visited node for insertion
+        Node* insHighlight = nullptr;
+        if (insStage == INS_TRAVERSING) {
+            if (insTraversalIndex < (int)insTraversalPath.size()) insHighlight = insTraversalPath[insTraversalIndex];
+            else if (!insTraversalPath.empty()) insHighlight = insTraversalPath.back();
+        }
+
+        // Determine search current node and list of visited for rings
         Node* searchCurrent = nullptr;
         if (!searchPath.empty() && searchIndex > 0) {
             int idx = std::min(searchIndex - 1, (int)searchPath.size() - 1);
             searchCurrent = searchPath[idx];
         }
 
-        // If searching, we want the visited nodes to be shown as YELLOW rings.
-        // We'll draw tree with combined highlight logic: search visited nodes stay yellow by painting rings in addition.
-        // For simplicity, we pass 'delHighlight' as the main highlight (only one outer ring). We then draw search rings separately.
+        // Composite drawing: pass delHighlight as primary highlight, then draw search rings and insert rings separately
         DrawTree(root, delHighlight, animNode);
 
-        // Draw additional rings for search path visited
-        if (!searchPath.empty()) {
+        // Draw insertion traversal rings (visited nodes remain yellow while traversing)
+        if (insStage == INS_TRAVERSING) {
+            for (int i = 0; i < std::min(insTraversalIndex, (int)insTraversalPath.size()); ++i) {
+                Node* n = insTraversalPath[i];
+                DrawCircle((int)n->animX, (int)n->animY, n->radius + 6, Fade(YELLOW, 0.85f));
+            }
+        }
+
+        // Draw search visited rings
+        if (searchStage == S_TRAVERSING || searchStage == S_FLASH_FOUND || searchStage == S_FLASH_NOTFOUND) {
             for (int i = 0; i < std::min(searchIndex, (int)searchPath.size()); ++i) {
                 Node* n = searchPath[i];
                 DrawCircle((int)n->animX, (int)n->animY, n->radius + 6, Fade(YELLOW, 0.85f));
             }
         }
 
-        // If flashing found/notfound, draw the flashing color over the final node
+        // Flashing on found/notfound
         if (searchStage == S_FLASH_FOUND && searchFinalNode) {
-            // toggle visible on/off using searchFrames parity
             bool visible = ((flashCount % 2) == 0);
             if (visible) DrawCircle((int)searchFinalNode->animX, (int)searchFinalNode->animY, searchFinalNode->radius + 8, GREEN);
         }
@@ -632,9 +786,9 @@ int main() {
         EndMode2D();
 
         // UI top
-        DrawRectangle(0, 0, SCREEN_W, 130, LIGHTGRAY);
-        DrawText("BST Visualizer - Insert / Delete (Option C) / Search (Option C, path + flash).", 20, 18, 18, BLACK);
-        DrawText("Click Insert/Delete/Search then type value and press Enter. Search is blocked while Delete animation runs.", 20, 40, 16, DARKGRAY);
+        DrawRectangle(0, 0, SCREEN_W, 160, LIGHTGRAY);
+        DrawText("BST Visualizer - Insert (animated), Delete (Option C), Search (Option C) + Validations", 20, 18, 18, BLACK);
+        DrawText("Click Insert/Delete/Search then type value and press Enter. Search waits while delete/insert animations run.", 20, 40, 16, DARKGRAY);
 
         // Draw buttons
         auto DrawButton = [&](Rectangle r, const char* label) {
@@ -654,40 +808,52 @@ int main() {
         std::string modeHint = (mode == MODE_INSERT) ? "(insert mode)" : (mode == MODE_DELETE ? "(delete mode)" : "(search mode)");
         DrawText(modeHint.c_str(), (int)inputBox.x + 8, (int)(inputBox.y + inputBox.height + 4), 14, DARKGRAY);
 
-        // instructions
-        DrawText("Arrow keys to pan, mouse wheel to zoom.", 620, 78, 16, DARKGRAY);
+        // Status message area (center top)
+        if (!statusMessage.empty()) {
+            int width = MeasureText(statusMessage.c_str(), 20);
+            DrawRectangle(SCREEN_W / 2 - width / 2 - 10, 120, width + 20, 36, Fade(LIGHTGRAY, 0.95f));
+            DrawRectangleLines(SCREEN_W / 2 - width / 2 - 10, 120, width + 20, 36, BLACK);
+            DrawText(statusMessage.c_str(), SCREEN_W / 2 - width / 2, 128, 20, BLACK);
+        }
+
+        // small instructions
+        DrawText("Arrow keys to pan, mouse wheel to zoom.", 620, 100, 16, DARKGRAY);
 
         EndDrawing();
 
-        // After draw: handle button clicks that set focus/mode (ensures clicks captured visually)
+        // After draw: handle button clicks that set focus/mode
         if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
             if (CheckCollisionPointRec(mouse, insertBtn)) { inputFocused = true; mode = MODE_INSERT; }
             if (CheckCollisionPointRec(mouse, deleteBtn)) { inputFocused = true; mode = MODE_DELETE; }
             if (CheckCollisionPointRec(mouse, searchBtn)) { inputFocused = true; mode = MODE_SEARCH; }
         }
 
-        // Post-frame: advance deletion traversal highlight pointer when in traversing stage (so it shows visited nodes)
-        if (delStage == DEL_TRAVERSING && delTraversalIndex < (int)delTraversalPath.size()) {
-            // nothing - the visual advancement is handled by incrementing delTraversalIndex in the update section above
+        // --- Advance insTraversalPath population at start of insStage ---
+        // When insertion started, we populated insParent/insNewX/insNewY in StartInsertion(). But we also need insTraversalPath content:
+        // If insStage is INS_TRAVERSING and insTraversalPath empty, populate it now (so we don't race).
+        if (insStage == INS_TRAVERSING && insTraversalPath.empty()) {
+            // Re-simulate traversal to fill insTraversalPath
+            Node* cur = root;
+            if (!cur) {
+                // nothing to traverse (root will be created)
+                // nothing to populate
+            }
+            else {
+                Node* parent = nullptr;
+                float offset = 220.0f;
+                Node* temp = root;
+                while (temp) {
+                    insTraversalPath.push_back(temp);
+                    if (insValuePending < temp->value) temp = temp->left;
+                    else temp = temp->right;
+                }
+            }
+            insTraversalIndex = 0;
         }
-
-        // Post-frame: for search, if in TRAVERSING, populate searchPath from StartSearch; we do this once when search starts
-        static bool searchInitialized = false;
-        if (searchStage == S_TRAVERSING && !searchInitialized) {
-            // populate searchPath from StartSearch's context: we stored it in StartSearch's local vector by writing to global searchPath
-            // but StartSearch was not called here; instead call StartSearch before; ensure searchPath is set by StartSearch
-            // To keep consistent we store path in a global variable when starting search
-            // (StartSearch sets searchPath); so here we just set flag to avoid re-init
-            searchInitialized = true;
-        }
-        if (searchStage == S_IDLE) searchInitialized = false;
-
-        // Note: StartSearch sets 'searchPath' and 'searchFinalNode' already.
-        // We must also ensure traversal index advances - handled above by searchIndex increment.
 
     } // main loop
 
-    // Cleanup
+    // Cleanup tree
     std::function<void(Node*)> cleanup = [&](Node* n) {
         if (!n) return;
         cleanup(n->left);
